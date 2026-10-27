@@ -168,6 +168,7 @@
       height: 38px;
       padding: 3px;
       border: 1px solid rgba(38, 56, 79, 0.14);
+      border-radius: 79px;
       border-radius: 7px;
       background: #fff;
       cursor: pointer;
@@ -309,7 +310,7 @@
         <button class="icon-button active" type="button" data-tool="pen" title="筆刷" aria-label="筆刷">✎</button>
         <button class="icon-button" type="button" data-tool="eraser" title="橡皮擦" aria-label="橡皮擦">⌫</button>
         <button class="icon-button" type="button" data-tool="strokeEraser" title="筆畫橡皮擦" aria-label="筆畫橡皮擦">⌧</button>
-        <button class="icon-button" type="button" data-tool="select" title="選擇筆畫" aria-label="選擇筆畫">☝</button>
+        <button class="icon-button" type="button" data-tool="select" title="框選與移動筆畫" aria-label="框選與移動筆畫">☝</button>
         <button class="icon-button" type="button" data-tool="pan" title="平移" aria-label="平移">↔</button>
         <button class="icon-button" type="button" data-tool="line" title="直線" aria-label="直線">╱</button>
         <button class="icon-button" type="button" data-tool="rect" title="長方形" aria-label="長方形">□</button>
@@ -421,10 +422,12 @@
     let drawingPointerId = null;
     let strokeErasePointerId = null;
     let selectionPointerId = null;
-    let selectedStrokeId = null;
+    let selectedStrokeIds = new Set();
     let selectionStartWorld = null;
-    let selectionOriginalStroke = null;
+    let selectionOriginalStrokes = new Map();
     let selectionMoved = false;
+    let isMarqueeSelecting = false;
+    let marqueeRect = null;
     let stickyResizePointerId = null;
     let stickyResizeNoteId = null;
     let stickyResizeStartWorld = null;
@@ -678,7 +681,8 @@
 
       const topLeft = worldToScreen(stroke.x, stroke.y);
       targetCtx.drawImage(image, topLeft.x, topLeft.y, stroke.imageWidth * viewport.zoom, stroke.imageHeight * viewport.zoom);
-      } 
+    }
+
     function drawRegion(targetCtx, region) {
       if (!region.loops || region.loops.length === 0) return;
 
@@ -940,7 +944,7 @@
           if (y + lineHeight > top + maxHeight) break;
           targetCtx.fillText(lines[i], left, y);
         }
-      } else if (note.id === selectedStrokeId) {
+      } else if (selectedStrokeIds.has(note.id)) {
         targetCtx.fillStyle = "rgba(23, 32, 51, 0.34)";
         targetCtx.fillText("點編輯輸入文字", left, top);
       }
@@ -1084,16 +1088,84 @@
       ctx.restore();
     }
 
+    function getCombinedSelectionBounds() {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let maxStrokeWidth = 1;
+      let count = 0;
+
+      for (const id of selectedStrokeIds) {
+        const stroke = findStrokeById(id);
+        const bounds = getStrokeBounds(stroke);
+        if (!bounds) continue;
+        minX = Math.min(minX, bounds.minX);
+        minY = Math.min(minY, bounds.minY);
+        maxX = Math.max(maxX, bounds.maxX);
+        maxY = Math.max(maxY, bounds.maxY);
+        maxStrokeWidth = Math.max(maxStrokeWidth, stroke.width || 1);
+        count += 1;
+      }
+
+      if (count === 0) return null;
+      return { minX, minY, maxX, maxY, maxStrokeWidth, count };
+    }
+
     function drawSelectionBox() {
-      if (activeTool !== "select" || !selectedStrokeId) return;
+      if (activeTool !== "select") return;
 
-      const stroke = findStrokeById(selectedStrokeId);
-      const bounds = getStrokeBounds(stroke);
-      if (!bounds) return;
+      // 繪製正在拖曳的範圍選取框 (Marquee Box)
+      if (isMarqueeSelecting && marqueeRect) {
+        const topLeft = worldToScreen(marqueeRect.minX, marqueeRect.minY);
+        const bottomRight = worldToScreen(marqueeRect.maxX, marqueeRect.maxY);
+        const left = Math.min(topLeft.x, bottomRight.x);
+        const top = Math.min(topLeft.y, bottomRight.y);
+        const width = Math.abs(bottomRight.x - topLeft.x);
+        const height = Math.abs(bottomRight.y - topLeft.y);
 
-      const padding = Math.max(8, (stroke.width || 1) * viewport.zoom / 2 + 6);
-      const topLeft = worldToScreen(bounds.minX, bounds.minY);
-      const bottomRight = worldToScreen(bounds.maxX, bounds.maxY);
+        ctx.save();
+        ctx.fillStyle = "rgba(15, 139, 141, 0.12)";
+        ctx.strokeStyle = "#0f8b8d";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.fillRect(left, top, width, height);
+        ctx.strokeRect(left, top, width, height);
+        ctx.restore();
+      }
+
+      if (selectedStrokeIds.size === 0) return;
+
+      // 如果多選，畫出每個個別物件的細虛線提示框
+      if (selectedStrokeIds.size > 1) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(15, 139, 141, 0.45)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        for (const id of selectedStrokeIds) {
+          const stroke = findStrokeById(id);
+          const b = getStrokeBounds(stroke);
+          if (!b) continue;
+          const pad = Math.max(4, (stroke.width || 1) * viewport.zoom / 2 + 3);
+          const tl = worldToScreen(b.minX, b.minY);
+          const br = worldToScreen(b.maxX, b.maxY);
+          ctx.strokeRect(
+            Math.min(tl.x, br.x) - pad,
+            Math.min(tl.y, br.y) - pad,
+            Math.abs(br.x - tl.x) + pad * 2,
+            Math.abs(br.y - tl.y) + pad * 2
+          );
+        }
+        ctx.restore();
+      }
+
+      // 畫出整體的外圍群組選取框
+      const combined = getCombinedSelectionBounds();
+      if (!combined) return;
+
+      const padding = Math.max(8, combined.maxStrokeWidth * viewport.zoom / 2 + 6);
+      const topLeft = worldToScreen(combined.minX, combined.minY);
+      const bottomRight = worldToScreen(combined.maxX, combined.maxY);
       const left = Math.min(topLeft.x, bottomRight.x) - padding;
       const top = Math.min(topLeft.y, bottomRight.y) - padding;
       const width = Math.abs(bottomRight.x - topLeft.x) + padding * 2;
@@ -1256,7 +1328,7 @@
         strokes = migrateLegacyErasers(savedStrokes);
         undoStack = [];
         redoStack = [];
-        selectedStrokeId = null;
+        selectedStrokeIds.clear();
 
         if (data.viewport && Number.isFinite(data.viewport.x) && Number.isFinite(data.viewport.y) && Number.isFinite(data.viewport.zoom)) {
           viewport.x = data.viewport.x;
@@ -1323,8 +1395,10 @@
       strokeErasePointerId = null;
       selectionPointerId = null;
       selectionStartWorld = null;
-      selectionOriginalStroke = null;
+      selectionOriginalStrokes.clear();
       selectionMoved = false;
+      isMarqueeSelecting = false;
+      marqueeRect = null;
       erasedStrokeIds.clear();
       currentStroke = null;
       previewShape = null;
@@ -1345,7 +1419,7 @@
       };
 
       strokes.push(note);
-      selectedStrokeId = note.id;
+      selectedStrokeIds = new Set([note.id]);
       setTool("select");
       markLayerDirty();
       pushUndoAction({
@@ -1358,7 +1432,7 @@
     }
 
     function handleStickyControl(event, control) {
-      selectedStrokeId = control.note.id;
+      selectedStrokeIds = new Set([control.note.id]);
       updateUndoButton();
 
       if (control.action === "delete") {
@@ -1505,6 +1579,23 @@
       requestRedraw();
     }
 
+    function isPointInCombinedSelectionBounds(world) {
+      if (selectedStrokeIds.size === 0) return false;
+      const combined = getCombinedSelectionBounds();
+      if (!combined) return false;
+      const pad = Math.max(8 / viewport.zoom, combined.maxStrokeWidth / 2 + 6 / viewport.zoom);
+      return world.x >= combined.minX - pad
+        && world.x <= combined.maxX + pad
+        && world.y >= combined.minY - pad
+        && world.y <= combined.maxY + pad;
+    }
+
+    function doesStrokeIntersectRect(stroke, rect) {
+      const b = getStrokeBounds(stroke);
+      if (!b) return false;
+      return !(b.maxX < rect.minX || b.minX > rect.maxX || b.maxY < rect.minY || b.minY > rect.maxY);
+    }
+
     function beginSelection(event, world) {
       confirmStickyEdit();
       selectionPointerId = event.pointerId;
@@ -1512,57 +1603,130 @@
       selectionMoved = false;
 
       const hit = findStrokeAt(world);
-      if (!hit) {
-        selectedStrokeId = null;
-        selectionOriginalStroke = null;
-        updateUndoButton();
-        markLayerDirty();
-        requestRedraw();
-        return;
+
+      if (hit) {
+        if (event.shiftKey) {
+          if (selectedStrokeIds.has(hit.stroke.id)) {
+            selectedStrokeIds.delete(hit.stroke.id);
+          } else {
+            selectedStrokeIds.add(hit.stroke.id);
+          }
+        } else if (!selectedStrokeIds.has(hit.stroke.id)) {
+          selectedStrokeIds = new Set([hit.stroke.id]);
+        }
+        isMarqueeSelecting = false;
+        marqueeRect = null;
+      } else if (isPointInCombinedSelectionBounds(world) && !event.shiftKey) {
+        // 點在已框選的群組範圍內，直接拖動整個群組
+        isMarqueeSelecting = false;
+        marqueeRect = null;
+      } else {
+        // 在空白處按下，啟動拉框選取 (Marquee Selection)
+        if (!event.shiftKey) {
+          selectedStrokeIds.clear();
+        }
+        isMarqueeSelecting = true;
+        marqueeRect = {
+          minX: world.x,
+          minY: world.y,
+          maxX: world.x,
+          maxY: world.y
+        };
       }
 
-      selectedStrokeId = hit.stroke.id;
-      selectionOriginalStroke = cloneStroke(hit.stroke);
+      selectionOriginalStrokes.clear();
+      for (const id of selectedStrokeIds) {
+        const s = findStrokeById(id);
+        if (s) selectionOriginalStrokes.set(id, cloneStroke(s));
+      }
+
       updateUndoButton();
       markLayerDirty();
       requestRedraw();
     }
 
     function continueSelection(world, pointerId) {
-      if (selectionPointerId !== pointerId || !selectedStrokeId || !selectionOriginalStroke || !selectionStartWorld) return;
+      if (selectionPointerId !== pointerId || !selectionStartWorld) return;
+
+      if (isMarqueeSelecting) {
+        marqueeRect = {
+          minX: Math.min(selectionStartWorld.x, world.x),
+          minY: Math.min(selectionStartWorld.y, world.y),
+          maxX: Math.max(selectionStartWorld.x, world.x),
+          maxY: Math.max(selectionStartWorld.y, world.y)
+        };
+        selectedStrokeIds.clear();
+        for (const stroke of strokes) {
+          if (stroke.type === "eraser") continue;
+          if (doesStrokeIntersectRect(stroke, marqueeRect)) {
+            selectedStrokeIds.add(stroke.id);
+          }
+        }
+        updateUndoButton();
+        requestRedraw();
+        return;
+      }
+
+      if (selectedStrokeIds.size === 0 || selectionOriginalStrokes.size === 0) return;
 
       const deltaX = world.x - selectionStartWorld.x;
       const deltaY = world.y - selectionStartWorld.y;
       const moved = Math.hypot(deltaX, deltaY) >= MIN_POINT_DISTANCE / viewport.zoom;
       if (!moved && !selectionMoved) return;
 
-      const movedStroke = cloneStroke(selectionOriginalStroke);
-      translateStroke(movedStroke, deltaX, deltaY);
-
-      if (replaceStrokeById(selectedStrokeId, movedStroke)) {
-        selectionMoved = true;
-        markLayerDirty();
-        requestRedraw();
+      for (const [id, origStroke] of selectionOriginalStrokes.entries()) {
+        const movedStroke = cloneStroke(origStroke);
+        translateStroke(movedStroke, deltaX, deltaY);
+        replaceStrokeById(id, movedStroke);
       }
+
+      selectionMoved = true;
+      markLayerDirty();
+      requestRedraw();
     }
 
     function endSelection(event) {
       if (selectionPointerId !== event.pointerId) return;
 
-      const finalStroke = selectedStrokeId ? findStrokeById(selectedStrokeId) : null;
-      if (selectionMoved && selectionOriginalStroke && finalStroke) {
-        pushUndoAction({
-          type: "move",
-          strokeId: selectedStrokeId,
-          before: selectionOriginalStroke,
-          after: cloneStroke(finalStroke)
-        });
+      if (isMarqueeSelecting) {
+        isMarqueeSelecting = false;
+        marqueeRect = null;
+        if (selectedStrokeIds.size > 0) {
+          showStatus(`已框選 ${selectedStrokeIds.size} 個物件，可拖曳移動或刪除。`);
+        }
+        updateUndoButton();
+        requestRedraw();
+      } else if (selectionMoved && selectionOriginalStrokes.size > 0) {
+        const moves = [];
+        for (const [id, beforeStroke] of selectionOriginalStrokes.entries()) {
+          const afterStroke = findStrokeById(id);
+          if (afterStroke) {
+            moves.push({
+              strokeId: id,
+              before: beforeStroke,
+              after: cloneStroke(afterStroke)
+            });
+          }
+        }
+        if (moves.length === 1) {
+          pushUndoAction({
+            type: "move",
+            strokeId: moves[0].strokeId,
+            before: moves[0].before,
+            after: moves[0].after
+          });
+        } else if (moves.length > 1) {
+          pushUndoAction({
+            type: "moveMultiple",
+            moves
+          });
+        }
         scheduleAutosave();
       }
 
       selectionPointerId = null;
       selectionStartWorld = null;
-      selectionOriginalStroke = null;
+      selectionOriginalStrokes.clear();
       selectionMoved = false;
     }
 
@@ -1574,7 +1738,7 @@
 
     function updateUndoButton() {
       undoBtn.disabled = undoStack.length === 0;
-      deleteSelectedBtn.disabled = !selectedStrokeId;
+      deleteSelectedBtn.disabled = selectedStrokeIds.size === 0;
     }
 
     function findStrokeById(id) {
@@ -1745,19 +1909,36 @@
 
       if (action.type === "add") {
         removeStrokeById(action.stroke.id);
-        if (selectedStrokeId === action.stroke.id) {
-          selectedStrokeId = null;
+        selectedStrokeIds.delete(action.stroke.id);
+      } else if (action.type === "addMultiple") {
+        for (const s of action.strokes) {
+          removeStrokeById(s.id);
+          selectedStrokeIds.delete(s.id);
         }
       } else if (action.type === "delete") {
         const insertAt = clamp(action.index, 0, strokes.length);
         strokes.splice(insertAt, 0, action.stroke);
-        selectedStrokeId = action.stroke.id;
+        selectedStrokeIds = new Set([action.stroke.id]);
+      } else if (action.type === "deleteMultiple") {
+        const sorted = [...action.items].sort((a, b) => a.index - b.index);
+        selectedStrokeIds.clear();
+        for (const item of sorted) {
+          const insertAt = clamp(item.index, 0, strokes.length);
+          strokes.splice(insertAt, 0, cloneStroke(item.stroke));
+          selectedStrokeIds.add(item.stroke.id);
+        }
       } else if (action.type === "move" || action.type === "update") {
         replaceStrokeById(action.strokeId, cloneStroke(action.before));
-        selectedStrokeId = action.strokeId;
+        selectedStrokeIds = new Set([action.strokeId]);
+      } else if (action.type === "moveMultiple") {
+        selectedStrokeIds.clear();
+        for (const m of action.moves) {
+          replaceStrokeById(m.strokeId, cloneStroke(m.before));
+          selectedStrokeIds.add(m.strokeId);
+        }
       } else if (action.type === "clear" || action.type === "erase") {
         strokes = action.strokes.map(cloneStroke);
-        selectedStrokeId = null;
+        selectedStrokeIds.clear();
       }
 
       redoStack.push(action);
@@ -1775,20 +1956,52 @@
     }
 
     function deleteSelectedStroke() {
-      if (!selectedStrokeId) {
+      if (selectedStrokeIds.size === 0) {
         showStatus("尚未選取任何物件。");
         return;
       }
 
-      const index = findStrokeIndexById(selectedStrokeId);
-      if (index < 0) {
-        selectedStrokeId = null;
-        updateUndoButton();
-        requestRedraw();
+      if (selectedStrokeIds.size === 1) {
+        const onlyId = Array.from(selectedStrokeIds)[0];
+        const index = findStrokeIndexById(onlyId);
+        if (index < 0) {
+          selectedStrokeIds.clear();
+          updateUndoButton();
+          requestRedraw();
+          return;
+        }
+        deleteStrokeAtIndex(index, "已刪除所選物件。");
         return;
       }
 
-      deleteStrokeAtIndex(index, "已刪除所選物件。");
+      const items = [];
+      for (let i = strokes.length - 1; i >= 0; i -= 1) {
+        if (selectedStrokeIds.has(strokes[i].id)) {
+          const removed = strokes[i];
+          if (editingStickyId === removed.id) {
+            editingStickyId = null;
+            editingStickyOriginal = null;
+            stickyEditor.value = "";
+            stickyEditor.style.display = "none";
+          }
+          items.push({ stroke: cloneStroke(removed), index: i });
+          strokes.splice(i, 1);
+        }
+      }
+
+      if (items.length > 0) {
+        pushUndoAction({
+          type: "deleteMultiple",
+          items
+        });
+        selectedStrokeIds.clear();
+        cancelDrawing();
+        markLayerDirty();
+        requestRedraw();
+        updateUndoButton();
+        scheduleAutosave();
+        showStatus(`已刪除 ${items.length} 個所選物件。`);
+      }
     }
 
     function deleteStrokeAtIndex(index, message) {
@@ -1808,7 +2021,7 @@
         stroke: removed,
         index
       });
-      selectedStrokeId = null;
+      selectedStrokeIds.delete(removed.id);
       cancelDrawing();
       markLayerDirty();
       requestRedraw();
@@ -1831,8 +2044,8 @@
       if (!hit || erasedStrokeIds.has(hit.stroke.id)) return false;
 
       strokes.splice(hit.index, 1);
-      if (selectedStrokeId === hit.stroke.id) {
-        selectedStrokeId = null;
+      if (selectedStrokeIds.has(hit.stroke.id)) {
+        selectedStrokeIds.delete(hit.stroke.id);
         updateUndoButton();
       }
       if (editingStickyId === hit.stroke.id) {
@@ -1867,7 +2080,6 @@
 
       for (const stroke of strokes) {
         if (stroke.type === "eraser") {
-          // 舊版可能把橡皮擦路徑當成獨立物件保存；新版不再把它繪製到圖層。
           changed = true;
           continue;
         }
@@ -2083,7 +2295,6 @@
       return groups;
     }
 
-
     function eraserTouchesVisibleStroke(erasure, stroke) {
       const points = erasure.points || [];
       const tolerance = Math.max(
@@ -2204,10 +2415,6 @@
 
       if (stroke.type === "region") {
         if (pointInLoops(world, stroke.loops || [])) return true;
-        // Region fragments must keep the erased gap selectable as empty space.
-        // Use a small boundary tolerance instead of the generous stroke hit
-        // tolerance, which could bridge a narrow cut and select the fragment
-        // on the other side.
         const boundaryTolerance = Math.max(
           0.5 / viewport.zoom,
           Math.min(tolerance, (stroke.width || 1) / 4)
@@ -2306,8 +2513,8 @@
       if (!isValidPoint(start) || !isValidPoint(end)) return false;
 
       const width = Math.abs(end.x - start.x);
-      const height = Math.abs(end.y - start.y);
-      const side = Math.min(width, height);
+      const height = Math.abs(strokeEndOrZero(end.y) - start.y);
+      const side = Math.min(width, Math.abs(end.y - start.y));
       if (side === 0) return distance(point, start) <= tolerance;
 
       const center = {
@@ -2316,6 +2523,10 @@
       };
 
       return Math.abs(distance(point, center) - side / 2) <= tolerance;
+    }
+
+    function strokeEndOrZero(val) {
+      return val || 0;
     }
 
     function isPointNearEllipse(point, start, end, tolerance) {
@@ -2385,7 +2596,6 @@
         };
         requestRedraw();
       }
-
     }
 
     function continueDrawing(event) {
@@ -2542,8 +2752,6 @@
       try {
         canvas.setPointerCapture(event.pointerId);
       } catch (error) {
-        // Synthetic or already-cancelled pointers cannot be captured; the
-        // drawing can still use the normal pointer event path.
         console.warn("Unable to capture pointer", error);
       }
       updateActivePointer(event);
@@ -2595,8 +2803,6 @@
 
       if (activePointers.has(pointerId)) activePointers.delete(pointerId);
 
-      // A drawing must be settled before considering an old pinch state. The
-      // previous order could cancel the eraser instead of committing it.
       if (isCurrentDrawing) {
         pinchState = null;
         endDrawing(event);
@@ -2728,7 +2934,7 @@
           imageHeight
         };
         strokes.push(stroke);
-        selectedStrokeId = stroke.id;
+        selectedStrokeIds = new Set([stroke.id]);
         setTool("select");
         markLayerDirty();
         pushUndoAction({ type: "add", stroke: cloneStroke(stroke) });
@@ -2758,7 +2964,7 @@
           });
         }
         strokes = [];
-        selectedStrokeId = null;
+        selectedStrokeIds.clear();
         editingStickyId = null;
         editingStickyOriginal = null;
         stickyEditor.value = "";
@@ -2892,7 +3098,7 @@
       strokes = migrateLegacyErasers(data.strokes.filter(isValidStroke).map(cloneStroke));
       undoStack = [];
       redoStack = [];
-      selectedStrokeId = null;
+      selectedStrokeIds.clear();
       editingStickyId = null;
       editingStickyOriginal = null;
       stickyEditor.value = "";
@@ -2976,6 +3182,7 @@
         image.src = src;
       });
     }
+
     function isValidErasure(erasure) {
       return erasure
         && Number.isFinite(erasure.width)
