@@ -326,9 +326,9 @@
           <button class="color-swatch" type="button" data-color="#15803d" style="--swatch-color: #15803d" title="綠色" aria-label="綠色"></button>
           <button class="color-swatch" type="button" data-color="#7e22ce" style="--swatch-color: #7e22ce" title="紫色" aria-label="紫色"></button>
         </div>
-        <label class="width-control" title="粗細">
-          粗細
-          <input id="widthSlider" type="range" min="1" max="60" value="4" aria-label="粗細">
+        <label class="width-control" title="目前工具粗細">
+          目前粗細
+          <input id="widthSlider" type="range" min="1" max="60" value="4" aria-label="目前工具粗細">
           <span id="widthValue">4px</span>
         </label>
         <button class="icon-button active" id="smoothToggleBtn" type="button" title="筆跡平滑" aria-label="筆跡平滑" aria-pressed="true">≈</button>
@@ -415,6 +415,10 @@
     let undoStack = [];
     let redoStack = [];
     let activeTool = "pen";
+    let toolWidths = {
+      pen: Number(widthSlider.value),
+      eraser: Number(widthSlider.value)
+    };
     let stickyColor = DEFAULT_STICKY_COLOR;
     let smoothStrokes = true;
     let activePointers = new Map();
@@ -435,6 +439,7 @@
     let erasedStrokeIds = new Set();
     let currentStroke = null;
     let previewShape = null;
+    let cursorPreviewPoint = null;
     let isSpacePressed = false;
     let isPanning = false;
     let panPointerId = null;
@@ -475,6 +480,34 @@
         x: event.clientX - rect.left,
         y: event.clientY - rect.top
       };
+    }
+
+    function isCanvasPointInside(point) {
+      return point.x >= 0
+        && point.y >= 0
+        && point.x <= cssWidth()
+        && point.y <= cssHeight();
+    }
+
+    function isCursorPreviewTool(tool = activeTool) {
+      return tool === "pen" || tool === "eraser";
+    }
+
+    function updateCursorPreview(point) {
+      if (!isCursorPreviewTool() || !isCanvasPointInside(point)) {
+        clearCursorPreview();
+        return;
+      }
+
+      cursorPreviewPoint = point;
+      requestRedraw();
+    }
+
+    function clearCursorPreview() {
+      if (!cursorPreviewPoint) return;
+
+      cursorPreviewPoint = null;
+      requestRedraw();
     }
 
     function screenToWorld(screenX, screenY) {
@@ -1084,6 +1117,25 @@
       ctx.restore();
     }
 
+    function drawCursorPreview() {
+      if (!cursorPreviewPoint || !isCursorPreviewTool()) return;
+
+      const width = Number(toolWidths[activeTool]);
+      if (!Number.isFinite(width) || width <= 0) return;
+
+      const radius = Math.max(0.5, width * viewport.zoom / 2);
+      ctx.save();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 0.82;
+      ctx.strokeStyle = activeTool === "eraser" ? "#627089" : colorPicker.value;
+      ctx.lineWidth = 1;
+      ctx.setLineDash(activeTool === "eraser" ? [4, 3] : []);
+      ctx.beginPath();
+      ctx.arc(cursorPreviewPoint.x, cursorPreviewPoint.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     function drawSelectionBox() {
       if (activeTool !== "select" || !selectedStrokeId) return;
 
@@ -1130,6 +1182,7 @@
       drawStroke(ctx, currentStroke);
       drawPreviewShape();
       drawSelectionBox();
+      drawCursorPreview();
       updateZoomLabel();
       updateStickyEditorPosition();
     }
@@ -1146,6 +1199,7 @@
       for (const button of toolbar.querySelectorAll("[data-tool]")) {
         button.classList.toggle("active", button.dataset.tool === tool);
       }
+      updateWidthControlForTool(tool);
       updatePanCursor();
       requestRedraw();
     }
@@ -1187,6 +1241,16 @@
       return changed;
     }
 
+    function updateWidthControlForTool(tool) {
+      if (tool !== "pen" && tool !== "eraser") return;
+
+      const width = toolWidths[tool];
+      if (!Number.isFinite(width)) return;
+
+      widthSlider.value = String(width);
+      widthValue.textContent = width + "px";
+    }
+
     function updatePanCursor() {
       canvas.classList.toggle("panning", activeTool === "pan" || isSpacePressed);
     }
@@ -1217,6 +1281,8 @@
         settings: {
           color: colorPicker.value,
           width: Number(widthSlider.value),
+          penWidth: toolWidths.pen,
+          eraserWidth: toolWidths.eraser,
           stickyColor,
           smoothStrokes
         },
@@ -1269,10 +1335,21 @@
             colorPicker.value = data.settings.color;
           }
 
-          if (Number.isFinite(data.settings.width)) {
-            widthSlider.value = String(clamp(data.settings.width, Number(widthSlider.min), Number(widthSlider.max)));
-            widthValue.textContent = widthSlider.value + "px";
-          }
+          const minimumWidth = Number(widthSlider.min);
+          const maximumWidth = Number(widthSlider.max);
+          const savedWidth = Number.isFinite(data.settings.width)
+            ? clamp(data.settings.width, minimumWidth, maximumWidth)
+            : Number(widthSlider.value);
+          const savedPenWidth = Number.isFinite(data.settings.penWidth)
+            ? clamp(data.settings.penWidth, minimumWidth, maximumWidth)
+            : savedWidth;
+          const savedEraserWidth = Number.isFinite(data.settings.eraserWidth)
+            ? clamp(data.settings.eraserWidth, minimumWidth, maximumWidth)
+            : savedWidth;
+
+          toolWidths.pen = savedPenWidth;
+          toolWidths.eraser = savedEraserWidth;
+          updateWidthControlForTool(activeTool);
 
           if (typeof data.settings.stickyColor === "string" && /^#[0-9a-f]{6}$/i.test(data.settings.stickyColor)) {
             stickyColor = data.settings.stickyColor;
@@ -2539,6 +2616,7 @@
     canvas.addEventListener("pointerdown", (event) => {
       if (event.target !== canvas) return;
       event.preventDefault();
+      if (event.pointerType !== "mouse") clearCursorPreview();
       try {
         canvas.setPointerCapture(event.pointerId);
       } catch (error) {
@@ -2571,6 +2649,8 @@
     });
 
     canvas.addEventListener("pointermove", (event) => {
+      const point = getCanvasPoint(event);
+      if (event.pointerType === "mouse") updateCursorPreview(point);
       if (!activePointers.has(event.pointerId)) return;
       event.preventDefault();
       updateActivePointer(event);
@@ -2584,6 +2664,16 @@
       } else {
         continueDrawing(event);
       }
+    });
+
+    canvas.addEventListener("pointerenter", (event) => {
+      if (event.pointerType === "mouse") {
+        updateCursorPreview(getCanvasPoint(event));
+      }
+    });
+
+    canvas.addEventListener("pointerleave", (event) => {
+      if (event.pointerType === "mouse") clearCursorPreview();
     });
 
     function finishPointer(event) {
@@ -2662,6 +2752,7 @@
       if (swatch) {
         colorPicker.value = swatch.dataset.color;
         updateActiveSwatch();
+        requestRedraw();
         scheduleAutosave();
       }
 
@@ -2675,11 +2766,16 @@
 
     colorPicker.addEventListener("input", () => {
       updateActiveSwatch();
+      requestRedraw();
       scheduleAutosave();
     });
 
     widthSlider.addEventListener("input", () => {
       widthValue.textContent = widthSlider.value + "px";
+      if (activeTool === "pen" || activeTool === "eraser") {
+        toolWidths[activeTool] = Number(widthSlider.value);
+      }
+      requestRedraw();
       scheduleAutosave();
     });
 
@@ -2867,6 +2963,10 @@
           y: viewport.y,
           zoom: viewport.zoom
         },
+        settings: {
+          penWidth: toolWidths.pen,
+          eraserWidth: toolWidths.eraser
+        },
         strokes
       };
       const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -2903,6 +3003,21 @@
         viewport.x = data.viewport.x;
         viewport.y = data.viewport.y;
         viewport.zoom = clamp(data.viewport.zoom, MIN_ZOOM, MAX_ZOOM);
+      }
+
+      if (data.settings) {
+        const minimumWidth = Number(widthSlider.min);
+        const maximumWidth = Number(widthSlider.max);
+        const savedPenWidth = Number.isFinite(data.settings.penWidth)
+          ? data.settings.penWidth
+          : Number(widthSlider.value);
+        const savedEraserWidth = Number.isFinite(data.settings.eraserWidth)
+          ? data.settings.eraserWidth
+          : Number(widthSlider.value);
+
+        toolWidths.pen = clamp(savedPenWidth, minimumWidth, maximumWidth);
+        toolWidths.eraser = clamp(savedEraserWidth, minimumWidth, maximumWidth);
+        updateWidthControlForTool(activeTool);
       }
 
       cancelDrawing();
